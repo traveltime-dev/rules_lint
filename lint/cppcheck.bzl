@@ -131,7 +131,6 @@ def _cppcheck_aspect_impl(target, ctx):
     info = OutputGroupInfo(
         rules_lint_human = info.rules_lint_human,
         rules_lint_machine = info.rules_lint_machine,
-        rules_lint_report = info.rules_lint_report,
         rules_lint_xml = depset([xml_output]),
         _validation = info._validation,
     )
@@ -184,11 +183,6 @@ def lint_cppcheck_aspect(binary, verbose = False):
             ),
             "_cppcheck_wrapper": attr.label(
                 default = Label("@aspect_rules_lint//lint:cppcheck_wrapper"),
-                executable = True,
-                cfg = "exec",
-            ),
-            "_patcher": attr.label(
-                default = "@aspect_rules_lint//lint/private:patcher",
                 executable = True,
                 cfg = "exec",
             ),

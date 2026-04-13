@@ -13,7 +13,7 @@ We suggest creating a `linters.bzl` file in whatever package contains most of yo
 custom Bazel configuration, commonly in `tools/lint`.
 This `linters.bzl` should contain linter aspect declarations.
 
-See the [example linters.bzl](/example/tools/lint/linters.bzl) for a complete install example.
+See the `/tools/lint/linters.bzl` file under each `/examples/[lang]` folder for a complete install example.
 See the `docs/` folder for API docs of the "aspect factory functions" that declare your linters.
 Some linter tools are built-in to rules_lint and may be installed by [multitool].
 The aspect factory function docs in the `docs/` folder describe when these are available and how to use them.
@@ -45,7 +45,7 @@ We recommend this workflow for several reasons:
 5. This is how Google does it, in the [Tricorder] tool that's integrated into code review (Critique) to present static analysis results.
    With [Aspect Workflows] we've provided a similar experience.
 
-[Tricorder]: https://static.googleusercontent.com/media/research.google.com/en/pubs/archive/43322.pdf
+[Tricorder]: https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/43322.pdf
 
 ### 2. Warnings in the terminal with `bazel lint`
 
@@ -55,14 +55,13 @@ We recommend this workflow for several reasons:
 - If a linter reports errors (by exiting non-zero), then `lint` exits 1.
 - If suggested fixes are produced by linters, `lint` will offer to apply them.
 
-To configure it, add a block like the following in `.aspect/cli/config.yaml` to point to the `*_lint` definition symbols.
-The `%` syntax is the same as [aspects declared on the command-line](https://bazel.build/extending/aspects#invoking_the_aspect_using_the_command_line)
+To configure it,
 
-```yaml
-lint:
-  aspects:
-    # Format: <extension file label>%<aspect top-level name>
-    - //tools/lint:linters.bzl%eslint
+1. Add the task to `MODULE.aspect` by running `aspect axl add gh:aspect-build/rules_lint`
+1. Add the `lint` config to `.bazelrc`, see [aspects declared on the command-line](https://bazel.build/extending/aspects#invoking_the_aspect_using_the_command_line)
+
+```
+common:lint --aspects=//tools/lint:linters.bzl%linter1[,...]
 ```
 
 [![asciicast](https://asciinema.org/a/xQWU1Wc1JINOubeguDDQbBqcq.svg)](https://asciinema.org/a/xQWU1Wc1JINOubeguDDQbBqcq)
@@ -71,7 +70,7 @@ lint:
 
 If you don't use [Aspect CLI], you can use vanilla Bazel with some wrapper like a shell script that runs the linter aspects over the requested targets.
 
-See the [example/lint.sh](/example/lint.sh) file as an example, and pay attention to the comments at the top about fitting it into your repo.
+See the [lint.sh gist](https://gist.github.com/alexeagle/44fd5444b43707766f59a3be2422dc63) as an example, and pay attention to the comments at the top about fitting it into your repo.
 
 [![asciicast](https://asciinema.org/a/gUUuQTCGIu85YMl6zz2GJIgD8.svg)](https://asciinema.org/a/gUUuQTCGIu85YMl6zz2GJIgD8)
 
@@ -90,11 +89,12 @@ Add at least the following to the command-line or to your `.bazelrc` file to cau
 ```
 
 This makes the build fail when any lint violations are present.
-You may wish to use the `--keep_going` flag to continue linting even after the first failure. See [example/lint.sh](/example/lint.sh) for more available flags.
+You may wish to use the `--keep_going` flag to continue linting even after the first failure.
 
 ### 5. Failures during `bazel test`
 
-Call the [lint_test](./lint_test.md) factory function in your `linters.bzl` file, then use the resulting rule in your BUILD files or in a wrapper macro.
+Call the [lint_test](https://registry.bazel.build/docs/aspect_rules_lint#lint-lint_test-bzl)
+factory function in your `linters.bzl` file, then use the resulting rule in your BUILD files or in a wrapper macro.
 
 See the `example/test/BUILD.bazel` file in this repo for some examples.
 

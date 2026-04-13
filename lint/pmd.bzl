@@ -2,7 +2,7 @@
 
 Typical usage:
 
-First, call the `fetch_pmd` helper in `WORKSPACE` to download the zip file.
+First, call the tools.pmd module extension to download the zip file.
 Alternatively you could use whatever you prefer for managing Java dependencies, such as a Maven integration rule.
 
 Next, declare a binary target for it, typically in `tools/lint/BUILD.bazel`:
@@ -27,7 +27,6 @@ pmd = lint_pmd_aspect(
 ```
 """
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "OPTIONAL_SARIF_PARSER_TOOLCHAIN", "OUTFILE_FORMAT", "filter_srcs", "noop_lint_action", "output_files", "parse_to_sarif_action", "should_visit")
 
 _MNEMONIC = "AspectRulesLintPMD"
@@ -39,7 +38,7 @@ def pmd_action(ctx, executable, srcs, rulesets, stdout, exit_code = None, option
 
     Args:
         ctx: Bazel Rule or Aspect evaluation context
-        executable: label of the the PMD program
+        executable: label of the PMD program
         srcs: java files to be linted
         rulesets: list of labels of the PMD ruleset files
         stdout: output file to generate
@@ -109,7 +108,7 @@ def lint_pmd_aspect(binary, rulesets, rule_kinds = ["java_binary", "java_library
     """A factory function to create a linter aspect.
 
     Attrs:
-        binary: a PMD executable. Can be obtained from rules_java like so:
+        binary: a PMD executable. Obtain from rules_java like so:
 
             java_binary(
                 name = "pmd",
@@ -147,13 +146,4 @@ def lint_pmd_aspect(binary, rulesets, rule_kinds = ["java_binary", "java_library
             ),
         },
         toolchains = [OPTIONAL_SARIF_PARSER_TOOLCHAIN],
-    )
-
-def fetch_pmd():
-    http_archive(
-        name = "net_sourceforge_pmd",
-        build_file_content = """java_import(name = "net_sourceforge_pmd", jars = glob(["*.jar"]), visibility = ["//visibility:public"])""",
-        integrity = "sha256-vov2j2wdZphL2WRak+Yxt4ocL0L18PhxkIL+rWdVOUA=",
-        strip_prefix = "pmd-bin-7.7.0/lib",
-        url = "https://github.com/pmd/pmd/releases/download/pmd_releases/7.7.0/pmd-dist-7.7.0-bin.zip",
     )

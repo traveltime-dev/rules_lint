@@ -2,7 +2,7 @@
 
 Typical usage:
 
-First, call the `fetch_checkstyle` helper in `WORKSPACE` to download the jar file.
+First, call the tools.checkstyle module extension to download the jar file.
 Alternatively you could use whatever you prefer for managing Java dependencies, such as a Maven integration rule.
 
 Next, declare a binary target for it, typically in `tools/lint/BUILD.bazel`:
@@ -27,7 +27,6 @@ checkstyle = lint_checkstyle_aspect(
 ```
 """
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
 load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "filter_srcs", "noop_lint_action", "output_files", "should_visit")
 
 _MNEMONIC = "AspectRulesLintCheckstyle"
@@ -39,7 +38,7 @@ def checkstyle_action(ctx, executable, srcs, config, data, stdout, exit_code = N
 
     Args:
         ctx: Bazel Rule or Aspect evaluation context
-        executable: label of the the Checkstyle program
+        executable: label of the Checkstyle program
         srcs: java files to be linted
         config: label of the checkstyle.xml file
         data: labels of additional xml files such as suppressions.xml
@@ -113,7 +112,7 @@ def lint_checkstyle_aspect(binary, config, data = [], rule_kinds = ["java_binary
     """A factory function to create a linter aspect.
 
     Attrs:
-        binary: a Checkstyle executable. Can be obtained from rules_java like so:
+        binary: a Checkstyle executable. Obtain from rules_java like so:
 
             java_binary(
                 name = "checkstyle",
@@ -154,11 +153,4 @@ def lint_checkstyle_aspect(binary, config, data = [], rule_kinds = ["java_binary
                 default = rule_kinds,
             ),
         },
-    )
-
-def fetch_checkstyle():
-    http_jar(
-        name = "com_puppycrawl_tools_checkstyle",
-        url = "https://github.com/checkstyle/checkstyle/releases/download/checkstyle-10.17.0/checkstyle-10.17.0-all.jar",
-        sha256 = "51c34d738520c1389d71998a9ab0e6dabe0d7cf262149f3e01a7294496062e42",
     )

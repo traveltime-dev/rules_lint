@@ -34,51 +34,73 @@ load("@aspect_rules_lint//lint:clippy.bzl", "lint_clippy_aspect")
 
 clippy = lint_clippy_aspect(
     config = Label("//:.clippy.toml"),
+    # Any clippy flags as needed like "-DWarnings".
+    clippy_flags = ["-Dwarnings"],
 )
 ```
 
 Now your targets will be linted with clippy.
 If you wish a target to be excluded from linting, you can give them the `noclippy` tag.
+If you wish a clippy lint exception to fail the build, please enable the `--@aspect_rules_lint//lint:fail_on_violation` flag.
 
-Please note that, for now all clippy warnings are considered failures.
-This is because rules_rust will fail the entire execution if there's even one error,
-so we need to limit the reports to just warnings so that we can continue the target execution and generate useful output files.
-Because we limit all errors to warnings, we must consider every warning as an error.
+Please note that the aspect will propagate to all transitive Rust dependencies of your
+`rust_library`, `rust_binary`, and `rust_test` targets.
 
 Please watch issue https://github.com/aspect-build/rules_lint/issues/385 for updates on this behavior.
 """
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy_action", "rust_common")
-load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "OPTIONAL_SARIF_PARSER_TOOLCHAIN", "OUTFILE_FORMAT", "filter_srcs", "noop_lint_action", "output_files", "parse_to_sarif_action", "patch_and_output_files", "should_visit")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_action")
+load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "OUTFILE_FORMAT", "filter_srcs", "noop_lint_action", "output_files", "patch_and_output_files", "should_visit")
+load("//lint/private:patcher_action.bzl", "patcher_attrs", "run_patcher")
 
 _MNEMONIC = "AspectRulesLintClippy"
 
-def _marker_to_exit_code(ctx, marker, output, exit_code):
-    """Write 0 to exit_code if marker exists and the output is empty, fail otherwise.
+def _parse_wrapper_output_into_files(ctx, outputs, raw_process_wrapper_wrapper_output, fail_on_violation):
+    arguments = [
+        raw_process_wrapper_wrapper_output.path,
+        outputs.human.out.path,
+    ]
+    outs = [
+        outputs.human.out,
+    ]
+    command = """
+exit_code=$(head -n 1 $1)
+output=$(tail -n +2 $1)
+if [[ "${output}" != "" ]]; then
+    echo "${output}" > $2
+else
+    touch $2
+fi
+"""
 
-    rules_rust won't write the exit code to the success_marker, so we assert that it exists and write the exit code ourselves.
-    If there is a success marker but the output is not empty, we mark it as a failure.
-    If there is no success marker, the action has failed anyway.
+    if fail_on_violation:
+        command += """
+echo "${output}" >&2
+exit "${exit_code}"
+"""
+    else:
+        command += """
+echo "${exit_code}" > $3
+echo "${exit_code}" > $4
+"""
+        arguments.append(outputs.human.exit_code.path)
+        arguments.append(outputs.machine.exit_code.path)
+        outs.append(outputs.human.exit_code)
+        outs.append(outputs.machine.exit_code)
 
-    Please note that all clippy warnings are considered failures.
-
-    Args:
-        ctx (ctx): The rule or aspect context. Must have access to `ctx.actions.run_shell`
-        marker (File): A file that will only exist if the action has succeeded
-        exit_code (File): A file that will be written with the exit code 0 if marker exists
-    """
     ctx.actions.run_shell(
-        outputs = [exit_code],
-        inputs = [marker, output],
-        arguments = [exit_code.path, output.path],
-        command = """
-            if [ -s $2 ]; then
-                echo '1' > $1
-            else
-                echo '0' > $1
-            fi
-        """,
+        command = command,
+        arguments = arguments,
+        inputs = [
+            raw_process_wrapper_wrapper_output,
+        ],
+        outputs = outs,
     )
+
+_CLIPPY_SKIP_TAG = "noclippy"
+
+def _has_skip_tag(rule):
+    return _CLIPPY_SKIP_TAG in rule.attr.tags
 
 # buildifier: disable=function-docstring
 def _clippy_aspect_impl(target, ctx):
@@ -88,70 +110,119 @@ def _clippy_aspect_impl(target, ctx):
     clippy_bin = ctx.toolchains[Label("@rules_rust//rust:toolchain_type")].clippy_driver
 
     files_to_lint = filter_srcs(ctx.rule)
-    if ctx.attr._options[LintOptionsInfo].fix:
-        print("WARNING: `fix` is not supported yet for clippy. Please follow https://github.com/aspect-build/rules_lint/issues/385 for updates.")
 
-    outputs, info = output_files(_MNEMONIC, target, ctx)
-
-    if len(files_to_lint) == 0:
-        noop_lint_action(ctx, outputs)
-        return [info]
-
+    # Declare outputs with sibling = crate_info.output when available, so they're placed in the same directory
+    # structure that rustc expects. This is required because rust_clippy_action sets --out-dir based on
+    # crate_info.output and rustc needs to write .d files to that directory
     crate_info = rust_clippy_action.get_clippy_ready_crate_info(target, ctx)
-    if not crate_info:
+    sibling = crate_info.output if crate_info else None
+
+    patch_file = None
+    if ctx.attr._options[LintOptionsInfo].fix:
+        outputs, info = patch_and_output_files(_MNEMONIC, target, ctx, sibling)
+        patch_file = getattr(outputs, "patch", None)
+    else:
+        outputs, info = output_files(_MNEMONIC, target, ctx, sibling)
+
+    if len(files_to_lint) == 0 or not crate_info or _has_skip_tag(ctx.rule):
         noop_lint_action(ctx, outputs)
         return [info]
 
-    extra_options = []
-    # FIXME: Implement support for --fix mode. Clippy has a --fix flag, but our patcher doesn't currently support running an action through a macro.
-    #        We have to either
-    #           (1) modify the patcher so that it can run an action through a macro, or
-    #           (2) modify rules_rust so that it gives us a struct with a command line we can run it with the patcher.
+    clippy_flags = [
+        # If we don't pass any clippy options, rules_rust will (rightly) default to -Dwarnings, which turns all warnings into errors.
+        # They do this to force Bazel to re-run targets on failures.
+        # However, we don't need to do that because we keep track of output files and exit codes separately.
+        "-Wwarnings",
+    ] + ctx.attr._clippy_flags
 
-    human_success_indicator = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "human_success_indicator"))
+    fail_on_violation = ctx.attr._options[LintOptionsInfo].fail_on_violation
+
+    raw_output = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "raw_process_wrapper_wrapper_output_human"), sibling = sibling)
+    raw_rustc_json_diagnostics = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "rustc_json_diagnostics"), sibling = sibling)
+    raw_output = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "raw_process_wrapper_wrapper_output_human"), sibling = sibling)
+
     rust_clippy_action.action(
         ctx,
         clippy_executable = clippy_bin,
-        process_wrapper = ctx.executable._process_wrapper,
+        process_wrapper = ctx.executable._process_wrapper_wrapper,
         crate_info = crate_info,
         config = ctx.file._config_file,
-        output = outputs.human.out,
-        success_marker = human_success_indicator,
-        cap_at_warnings = True,  # We don't want to crash the process if there are clippy errors, we just want to report them.
-        extra_clippy_flags = extra_options,
+        output = raw_output,
+        cap_at_warnings = False,
+        extra_clippy_flags = clippy_flags,
+        clippy_diagnostics_file = raw_rustc_json_diagnostics,
     )
-    _marker_to_exit_code(ctx, human_success_indicator, outputs.human.out, outputs.human.exit_code)
 
-    machine_success_indicator = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "machine_success_indicator"))
-    rust_clippy_action.action(
-        ctx,
-        clippy_executable = clippy_bin,
-        process_wrapper = ctx.executable._process_wrapper,
-        crate_info = crate_info,
-        config = ctx.file._config_file,
-        output = outputs.machine.out,
-        success_marker = machine_success_indicator,
-        cap_at_warnings = True,
-        extra_clippy_flags = extra_options,
-        error_format = "json",
-    )
-    _marker_to_exit_code(ctx, machine_success_indicator, outputs.machine.out, outputs.machine.exit_code)
+    _parse_wrapper_output_into_files(ctx, outputs, raw_output, fail_on_violation)
+    _parse_to_sarif_action(ctx, raw_rustc_json_diagnostics, outputs.machine.out)
 
-    # FIXME: Rustc only gives us JSON output, which we can't turn into SARIF yet.
-    # clippy uses rustc's IO format, which doesn't have a SARIF output mode built in,
-    # and they're not planning to add one.
-    # We could use clippy-sarif, which seems to be relatively maintained.
-    #
-    # Refs:
-    #  - https://github.com/rust-lang/rust-clippy/issues/8122
-    #  - https://github.com/psastras/sarif-rs/tree/main/clippy-sarif
-    # parse_to_sarif_action(ctx, _MNEMONIC, raw_machine_report, outputs.machine.out)
+    if patch_file != None:
+        _run_patcher(ctx, files_to_lint, raw_rustc_json_diagnostics, patch_file)
 
     return [info]
 
-DEFAULT_RULE_KINDS = ["rust_binary", "rust_library", "rust_test"]
+def _run_patcher(ctx, srcs, rustc_diagnostics_file, patch_file):
+    args = [
+        "patch",
+        # This path is relative to the execroot, we must relativize it to the bindir.
+        "../../../" + rustc_diagnostics_file.path,
+    ]
 
-def lint_clippy_aspect(config, rule_kinds = DEFAULT_RULE_KINDS):
+    # Use ctx.actions.symlink instead of copy_files_to_bin_actions so that the
+    # aspect creates the same action type (SymlinkAction) as rules_rust does when
+    # a target has generated inputs. rules_rust symlinks all source files to the
+    # bin directory in that case, and Bazel resolves shareable action conflicts
+    # only when the action keys match — which requires identical action types.
+    # See: https://github.com/bazelbuild/rules_rust/blob/74bd3d15f33c6133c84bf4348225cbc7ac206f51/rust/private/utils.bzl#L857
+    srcs_inputs = []
+    for src in srcs:
+        if src.is_source:
+            # Strip the package prefix to get the path relative to the package,
+            # so declare_file places the output at bazel-out/.../bin/<package>/<relative>.
+            package_prefix = ctx.label.package + "/"
+            relative_path = src.short_path[len(package_prefix):] if src.short_path.startswith(package_prefix) else src.short_path
+            bin_file = ctx.actions.declare_file(relative_path)
+            ctx.actions.symlink(output = bin_file, target_file = src)
+            srcs_inputs.append(bin_file)
+        else:
+            srcs_inputs.append(src)
+
+    run_patcher(
+        ctx,
+        ctx.executable,
+        inputs = [rustc_diagnostics_file] + srcs_inputs,
+        args = args,
+        tools = [ctx.executable._rustc_diagnostic_parser],
+        files_to_diff = [s.path for s in srcs],
+        patch_out = patch_file,
+        patch_cfg_env = {"BAZEL_BINDIR": ctx.bin_dir.path},
+        env = {},
+        mnemonic = _MNEMONIC,
+        progress_message = "Applying Clippy fixes to %{label}",
+    )
+
+def _parse_to_sarif_action(ctx, rustc_diagnostics_file, sarif_output):
+    args = [
+        "sarif",
+        rustc_diagnostics_file.path,
+        sarif_output.path,
+    ]
+
+    ctx.actions.run(
+        executable = ctx.executable._rustc_diagnostic_parser,
+        arguments = args,
+        inputs = [rustc_diagnostics_file],
+        outputs = [sarif_output],
+        # Must be set for js_binary to run.
+        # Ref: https://github.com/aspect-build/rules_js/tree/dbb5af0d2a9a2bb50e4cf4a96dbc582b27567155?tab=readme-ov-file#running-nodejs-programs
+        env = {
+            "BAZEL_BINDIR": ".",
+        },
+    )
+
+DEFAULT_RULE_KINDS = ["rust_binary", "rust_library", "rust_shared_library", "rust_test"]
+
+def lint_clippy_aspect(config, rule_kinds = DEFAULT_RULE_KINDS, clippy_flags = []):
     """A factory function to create a linter aspect.
 
     The Clippy binary will be read from the Rust toolchain.
@@ -159,6 +230,7 @@ def lint_clippy_aspect(config, rule_kinds = DEFAULT_RULE_KINDS):
     Args:
         config (File): Label of the desired Clippy configuration file to use. Reference: https://doc.rust-lang.org/clippy/configuration.html
         rule_kinds (List[str]): List of rule kinds to lint. Defaults to {default_rule_kinds}.
+        clippy_flags (List[str]): Extra clippy/rustc lint flags (e.g. `-Dwarnings`, `-Aclippy::style`).
     """.format(default_rule_kinds = DEFAULT_RULE_KINDS)
     attrs = {
         "_options": attr.label(
@@ -172,20 +244,50 @@ def lint_clippy_aspect(config, rule_kinds = DEFAULT_RULE_KINDS):
         "_rule_kinds": attr.string_list(
             default = rule_kinds,
         ),
-        "_process_wrapper": attr.label(
-            doc = "A process wrapper for running clippy on all platforms",
-            default = Label("@rules_rust//util/process_wrapper"),
+        "_clippy_flags": attr.string_list(
+            default = clippy_flags,
+        ),
+        "_process_wrapper_wrapper": attr.label(
+            doc = "A wrapper around the rules_rust process wrapper. See @aspect_rules_lint//lint/rust:process_wrapper_wrapper.sh for motivation and documentation.",
+            default = Label("//lint/rust:process_wrapper_wrapper"),
+            executable = True,
+            cfg = "exec",
+        ),
+        "_rustc_sarif_parser": attr.label(
+            doc = """A binary that can convert JSON rustc diagnostics into SARIF.
+
+Note that rustc diagnostics are different from cargo diagnostics, which is what common rust implementations like sarif-rs use.
+In particular, cargo diagnostics _may contain_ rustc diagnostics, but they don't have to.
+
+References:
+- Rustc diagnostic format: https://doc.rust-lang.org/beta/rustc/json.html#diagnostics
+""",
+            default = Label("//lint/rust:cli"),
+            executable = True,
+            cfg = "exec",
+        ),
+        "_rustc_diagnostic_parser": attr.label(
+            doc = """A binary that can convert JSON rustc diagnostics into SARIF.
+
+Note that rustc diagnostics are different from cargo diagnostics, which is what common rust implementations like sarif-rs use.
+In particular, cargo diagnostics _may contain_ rustc diagnostics, but they don't have to.
+
+References:
+- Rustc diagnostic format: https://doc.rust-lang.org/beta/rustc/json.html#diagnostics
+""",
+            default = Label("//lint/rust:cli"),
             executable = True,
             cfg = "exec",
         ),
     }
     return aspect(
         fragments = ["cpp"],
+        attr_aspects = ["deps"],
         implementation = _clippy_aspect_impl,
-        attrs = attrs,
-        toolchains = [
-            OPTIONAL_SARIF_PARSER_TOOLCHAIN,
-            Label("@rules_rust//rust:toolchain_type"),
-            "@bazel_tools//tools/cpp:toolchain_type",
-        ],
+        attrs = patcher_attrs | attrs,
+        toolchains =
+            [
+                Label("@rules_rust//rust:toolchain_type"),
+                "@bazel_tools//tools/cpp:toolchain_type",
+            ],
     )

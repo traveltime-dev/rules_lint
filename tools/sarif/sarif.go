@@ -30,12 +30,6 @@ import (
 	"github.com/reviewdog/reviewdog/parser"
 )
 
-type testStruct struct {
-	label    string
-	mnemonic string
-	report   string
-}
-
 func mnemonicPrettyName(mnemonic string) string {
 	return strings.Replace(mnemonic, "AspectRulesLint", "", 1)
 }
@@ -48,8 +42,7 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 	}
 
 	if len(mnemonic) == 0 {
-		fmt.Sprintf("Undefined linter mnemonic for target %s\n", label)
-		return "", nil
+		return "", fmt.Errorf("Undefined linter mnemonic for target %s\n", label)
 	}
 
 	var fm []string
@@ -57,6 +50,11 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 	// NB: Switch is on the MNEMONIC declared in rules_lint
 	// Helpful link for building custom fm strings: https://vimdoc.sourceforge.net/htmldoc/quickfix.html#errorformat
 	switch mnemonic {
+	case "AspectRulesLintBuildifier":
+		fm = []string{
+			`%f:%l:%c: %m`,
+			`%f:%l: %m`,
+		}
 	case "AspectRulesLintESLint":
 		fm = fmts.DefinedFmts()["eslint-compact"].Errorformat
 	case "AspectRulesLintFlake8":
@@ -64,8 +62,10 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 	case "AspectRulesLintPMD":
 		// TODO: upstream to https://github.com/reviewdog/errorformat/issues/62
 		fm = []string{`%f:%l:\\t%m`}
-  case "AspectRulesLintPylint":
+	case "AspectRulesLintPylint":
 		fm = []string{`%f:%l:%c: %m`}
+	case "AspectRulesLintPydoclint":
+		fm = []string{`%f:%l: %m`}
 	case "AspectRulesLintRuff":
 		fm = []string{
 			// %E forces a multiline error severity message. There is no forced single line error message
@@ -75,7 +75,8 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 		}
 	case "AspectRulesLintBuf":
 		fm = []string{
-			`--buf-plugin_out: %f:%l:%c:%m`,
+			`%E--buf-plugin_out: %f:%l:%c:%m`,
+			`%-Z%r`,
 		}
 	case "AspectRulesLintVale":
 		fm = []string{`%f:%l:%c:%m`}
@@ -91,6 +92,7 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 			`%AIn\ %f\ line\ %l:`,
 			`%C%.%#(%trror):\ %m%Z`,
 			`%C%.%#(%tarning):\ %m%Z`,
+			`%C%.%#(%tnfo):\ %m%Z`,
 			`%C%.%#`,
 		}
 	case "AspectRulesLintStylelint":
@@ -104,8 +106,23 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 			`%W%f:%l:%c: [warning] %m`,
 			`%I%f:%l:%c: [info] %m`,
 		}
+	case "AspectRulesLintQmllint":
+		fm = []string{
+			`%EError: %f:%l:%c: %m`,
+			`%WWarning: %f:%l:%c: %m`,
+			`%IInfo: %f:%l:%c: %m`,
+			`%-G%.%#`,
+		}
+	case "AspectRulesLintKeepSorted":
+		fm = []string{`%f:%l:%e:%m`}
+	case "AspectRulesLintTy":
+		fm = []string{
+			`%Eerror%m`,
+			`%C\\ \\ -->\\ %f:%l:%c`,
+			`%-G%.%#`,
+		}
 	default:
-		fmt.Sprintf("No format string for linter mnemonic %s from target %s\n", mnemonic, label)
+		return "", fmt.Errorf("No format string for linter mnemonic %s from target %s\n", mnemonic, label)
 	}
 
 	if len(fm) == 0 {
@@ -168,7 +185,7 @@ func determineRelativePath(path string, label string) string {
 	}
 	relative_path := re.FindSubmatch([]byte(path))
 
-	if relative_path != nil && len(relative_path) == 2 {
+	if len(relative_path) == 2 {
 		return string(relative_path[1])
 	}
 

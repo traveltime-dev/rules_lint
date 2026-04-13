@@ -39,24 +39,26 @@ load("@bazel_lib//lib:paths.bzl", "to_rlocation_path")
 
 def _write_assert(ctx, files):
     "Create a parameter to substitute into the shell script"
-    output = None
-    exit_code = None
+    outputs = []
+    exit_codes = []
     for f in files.to_list():
         if f.path.endswith(".out"):
-            output = f
+            outputs.append(f)
         elif f.path.endswith(".exit_code"):
-            exit_code = f
+            exit_codes.append(f)
         else:
             fail("rules_lint_human output group contains unrecognized file extension: ", f.path)
-    if output and exit_code:
-        return "assert_exit_code_zero '{}' '{}'".format(to_rlocation_path(ctx, exit_code), to_rlocation_path(ctx, output))
-    if output:
-        return "assert_output_empty '{}'".format(to_rlocation_path(ctx, output))
+    if outputs and exit_codes:
+        if len(outputs) != len(exit_codes):
+            fail("mismatch between outputs and exit_codes", outputs, exit_codes)
+        return ["assert_exit_code '{}' '{}'".format(to_rlocation_path(ctx, e), to_rlocation_path(ctx, o)) for e, o in zip(exit_codes, outputs)]
+    if outputs:
+        return ["assert_output_empty '{}'".format(to_rlocation_path(ctx, o)) for o in outputs]
     fail("missing output file among", files)
 
 def _test_impl(ctx):
     bin = ctx.actions.declare_file("{}.lint_test.sh".format(ctx.label.name))
-    asserts = [_write_assert(ctx, src[OutputGroupInfo].rules_lint_human) for src in ctx.attr.srcs]
+    asserts = [a for src in ctx.attr.srcs for a in _write_assert(ctx, src[OutputGroupInfo].rules_lint_human)]
 
     runfiles = ctx.runfiles(transitive_files = depset(transitive = [src[OutputGroupInfo].rules_lint_human for src in ctx.attr.srcs]))
     runfiles = runfiles.merge(ctx.attr._runfiles_lib[DefaultInfo].default_runfiles)
@@ -64,7 +66,10 @@ def _test_impl(ctx):
     ctx.actions.expand_template(
         template = ctx.file._bin,
         output = bin,
-        substitutions = {"{{asserts}}": "\n".join(asserts)},
+        substitutions = {
+            "{{asserts}}": "\n".join(asserts),
+            "{{expected_exit_code}}": str(ctx.attr.expected_exit_code),
+        },
         is_executable = True,
     )
     return [DefaultInfo(
@@ -77,6 +82,11 @@ def lint_test(aspect):
         implementation = _test_impl,
         attrs = {
             "srcs": attr.label_list(doc = "*_library targets", aspects = [aspect]),
+            "expected_exit_code": attr.int(default = 0, doc = """\
+                The expected exit code of the linter.
+                Default is 0, which means the test will fail if the linter reports any issues.
+                Set to a different value if you are testing that the linter correctly reports an issue.
+            """),
             "_bin": attr.label(default = ":lint_test.sh", allow_single_file = True, executable = True, cfg = "exec"),
             "_runfiles_lib": attr.label(default = "@bazel_tools//tools/bash/runfiles"),
         },

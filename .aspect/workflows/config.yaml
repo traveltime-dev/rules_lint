@@ -1,22 +1,28 @@
-# See https://docs.aspect.build/v/workflows/config
+# See https://docs.aspect.build/aspect-workflows/additional-materials/reference-config
 ---
 workspaces:
-  - .:
-      tasks:
-        - bzlmod-false:
-            without: true
-  - example
+  - .
+  # TODO:
+  # - examples/cpp
+  # - ...
 bazel:
   flags:
     - --config=ci
 tasks:
   - test:
+      name: "Bazel 7"
+      id: bazel-7
+      env:
+        USE_BAZEL_VERSION: 7.x
   - test:
-      name: "Test (WORKSPACE)"
-      id: bzlmod-false
-      bazel:
-        flags:
-          - --noenable_bzlmod
-          - --enable_workspace
+      name: Bazel 8
+      id: bazel-8
+      env:
+        USE_BAZEL_VERSION: 8.x
+  - test:
+      name: Bazel 9
+      id: bazel-9
+      env:
+        USE_BAZEL_VERSION: 9.x
 notifications:
   github: {}

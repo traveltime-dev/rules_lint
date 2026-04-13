@@ -8,9 +8,11 @@ TOOLS = {
     "Markdown": "prettier",
     # NB: includes LESS and SASS
     "CSS": "prettier",
+    "CUE": "cue-fmt",
     "GraphQL": "prettier",
     "HTML": "prettier",
     "Python": "ruff",
+    "QML": "qmlformat",
     "Starlark": "buildifier",
     "Jsonnet": "jsonnetfmt",
     "Terraform": "terraform-fmt",
@@ -33,10 +35,12 @@ TOOLS = {
     "Gherkin": "prettier",
     "F#": "fantomas",
     "C#": "csharpier",
+    "Pkl": "pkl",
 }
 
 # Provided to make install more convenient
 BUILTIN_TOOL_LABELS = {
+    "CUE": "@multitool//tools/cue",
     "Jsonnet": "@multitool//tools/jsonnetfmt",
     "Go": "@multitool//tools/gofumpt",
     "Shell": "@multitool//tools/shfmt",
@@ -48,9 +52,11 @@ BUILTIN_TOOL_LABELS = {
 # Flags to pass each tool's CLI when running in check mode
 CHECK_FLAGS = {
     "buildifier": "-mode=check",
+    "cue-fmt": "fmt --check",
     "swiftformat": "--lint",
-    "prettier": "--check",
+    "prettier": "--check --log-level=warn",
     "ruff": "format --check --force-exclude --diff",
+    "qmlformat": "",
     "shfmt": "--diff --apply-ignore",
     "java-format": "--set-exit-if-changed --dry-run",
     "djlint": "--format-css --format-js --check",
@@ -66,18 +72,21 @@ CHECK_FLAGS = {
     "rustfmt": "--check",
     "fantomas": "--check",
     "csharpier": "check",
+    "pkl": "format --silent",
 }
 
 # Flags to pass each tool when running in default mode
 FIX_FLAGS = {
     "buildifier": "-mode=fix",
+    "cue-fmt": "fmt",
     "djlint": "--format-css --format-js --reformat",
     "swiftformat": "",
-    "prettier": "--write",
+    "prettier": "--write --log-level=warn",
     # Force exclusions in the configuration file to be honored even when file paths are supplied
     # as command-line arguments; see
     # https://github.com/astral-sh/ruff/discussions/5857#discussioncomment-6583943
     "ruff": "format --force-exclude",
+    "qmlformat": "--inplace",
     # NB: apply-ignore added in https://github.com/mvdan/sh/issues/1037
     "shfmt": "-w --apply-ignore",
     "java-format": "--replace",
@@ -96,9 +105,18 @@ FIX_FLAGS = {
     "rustfmt": "",
     "fantomas": "",
     "csharpier": "format",
+    "pkl": "format --write",
 }
 
 def to_attribute_name(lang):
+    """Convert a language name to the corresponding attribute name in the formatter rule.
+
+    Args:
+        lang: The human-readable language name, e.g. "C++" or "F#".
+
+    Returns:
+        The corresponding attribute name in the formatter rule.
+    """
     if lang == "C++":
         return "cc"
     if lang == "C#":

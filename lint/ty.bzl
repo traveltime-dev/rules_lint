@@ -20,7 +20,7 @@ load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "OPTIONAL_SARIF_PARSER
 
 _MNEMONIC = "AspectRulesLintTy"
 
-def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code = None, env = {}, extra_search_paths = []):
+def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code = None, env = {}, extra_search_paths = [], color = True):
     """Run ty as an action under Bazel.
 
     ty supports persistent configuration files at both the project- and user-level
@@ -32,7 +32,7 @@ def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code 
 
     Args:
         ctx: Bazel Rule or Aspect evaluation context
-        executable: label of the the ty program
+        executable: label of the ty program
         srcs: python files to be linted
         transitive_srcs: depset of transitive Python sources from dependencies
         config: labels of ty config files (pyproject.toml, ty.toml)
@@ -42,6 +42,7 @@ def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code 
             https://docs.astral.sh/ty/reference/exit-codes/
         env: environment variables for ty
         extra_search_paths: list of paths to add as --extra-search-path for third-party module resolution
+        color: whether to enable color output (--color always) or disable it (--color never)
     """
     inputs = depset(srcs + config, transitive = [transitive_srcs])
     outputs = [stdout]
@@ -49,29 +50,85 @@ def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code 
     # Wire command-line options, see
     # `ty help check` to see available options
     args = ctx.actions.args()
-    args.add("check")
+
+    # Enable verbose output if debug mode is enabled
+    if ctx.attr._options[LintOptionsInfo].debug:
+        args.add("--vvv")
 
     # Add all source files to be linted
     args.add_all(srcs)
 
-    # Add extra search paths for third-party dependencies (pip packages)
-    for path in extra_search_paths:
-        args.add("--extra-search-path", path)
+    # Add config file flags based on the config file type
+    for config_file in config:
+        if config_file.basename == "pyproject.toml":
+            # For pyproject.toml, pass the directory with --project
+            args.add("--project", config_file.dirname)
+        else:
+            # For ty.toml or other config files, pass the full path with --config-file
+            args.add("--config-file", config_file.path)
 
-    ## Ty's color output is turned off for non-interactive invocations
-    args.add("--color", "always")
+    # In cases where a type can be found in both a stub and "normal" code, make sure the stub is preferred.
+    # See https://github.com/astral-sh/ty/issues/1967
+    stub_search_paths = []
+    code_search_paths = []
+
+    for p in extra_search_paths:
+        if "_types_" in p or "_stubs" in p:
+            stub_search_paths.append(p)
+        else:
+            code_search_paths.append(p)
+
+    # Build a script that adds --extra-search-path only for directories that exist
+    # Some pip package directories may not exist, so we check first
+    # Pass --extra-search-path via a @param file, as there might be many of them
+    extra_search_path_script = """PARAM_FILE="$(mktemp)"
+"""
+
+    for path in stub_search_paths + code_search_paths:
+        extra_search_path_script += """if [ -d "{path}" ]; then
+  echo "--extra-search-path" >> "$PARAM_FILE"
+  echo "{path}" >> "$PARAM_FILE"
+fi
+""".format(path = path)
+
+    color_flag = "--color always" if color else "--color never"
+    command = """
+{extra_search_path_script}
+readonly TMP_OUT=$(mktemp)
+
+{ty} check --force-exclude {color_flag} @"$PARAM_FILE" $@ > "$TMP_OUT" 2>&1
+RET=$?
+
+if [ "$RET" -eq 0 ]; then
+    touch {stdout}
+else
+    cp "$TMP_OUT" {stdout}
+fi
+"""
 
     if exit_code:
-        command = "{ty} $@ >{stdout}; echo $? >" + exit_code.path
         outputs.append(exit_code)
+        command += """
+echo "$RET" > {exit_code}
+"""
     else:
-        # Create empty file on success, as Bazel expects one
-        command = "{ty} $@ && touch {stdout}"
+        command += """
+if [ "$RET" -ne 0 ]; then
+    cat "$TMP_OUT" >&2
+    exit "$RET"
+fi
+"""
 
     ctx.actions.run_shell(
         inputs = inputs,
         outputs = outputs,
-        command = command.format(ty = executable.path, stdout = stdout.path),
+        command = command.format(
+            ty = executable.path,
+            stdout = stdout.path,
+            exit_code = exit_code.path if exit_code else "",
+            extra_search_path_script = extra_search_path_script,
+            color_flag = color_flag,
+        ),
         arguments = [args],
         mnemonic = _MNEMONIC,
         env = env,
@@ -79,15 +136,42 @@ def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code 
         tools = [executable],
     )
 
+def _resolve_import_path(import_path, workspace_name, bin_dir_path):
+    """Map a PyInfo import path to the correct execroot-relative search path.
+
+    Workspace-internal paths start with the workspace name (e.g. "_main/pkg/src")
+    and live directly under the execroot — they must NOT be prefixed with "external/".
+    if they're generated, then it will be relative to bazel bin dir
+    External paths (pip packages) live under "external/" in the execroot.
+
+    Args:
+        import_path: an entry from PyInfo.imports
+        workspace_name: ctx.workspace_name (e.g. "_main")
+        bin_dir_path: ctx.bin_dir.path, used for generated file path
+
+    Returns:
+        The corrected path string list (some of them might not exist)
+    """
+    if import_path == workspace_name or import_path == ".":
+        return [bin_dir_path]
+    if import_path.startswith(workspace_name + "/"):
+        rel = import_path[len(workspace_name) + 1:]
+        return [rel, bin_dir_path + "/" + rel]
+    external_rel = "external/" + import_path
+    return [external_rel, bin_dir_path + "/" + external_rel]
+
 # buildifier: disable=function-docstring
 def _ty_aspect_impl(target, ctx):
+    if not should_visit(ctx.rule, ctx.attr._rule_kinds, ctx.attr._filegroup_tags):
+        return []
+
     # Collect transitive sources from dependencies using the standard PyInfo provider.
     transitive_sources = []
 
-    # Collect import paths from PyInfo for third-party dependencies (pip packages).
-    # These paths are used with --extra-search-path to help ty find external modules.
-    # Import paths from pip packages look like "rules_python~~pip~pip_39_pathspec/site-packages"
-    # and need to be prefixed with "external/" to form the actual path in the execroot.
+    # Collect import paths from PyInfo for --extra-search-path.
+    # _resolve_import_path maps each entry to the correct execroot-relative path:
+    #   - pip packages get an "external/" prefix
+    #   - workspace-internal paths get the workspace name stripped
     import_paths = {}
 
     # Collect from deps attribute using PyInfo
@@ -95,10 +179,11 @@ def _ty_aspect_impl(target, ctx):
         for dep in ctx.rule.attr.deps:
             if PyInfo in dep:
                 transitive_sources.append(dep[PyInfo].transitive_sources)
-
-                # Collect imports from pip packages for extra search paths
+                transitive_sources.append(dep[PyInfo].transitive_pyi_files)
                 for import_path in dep[PyInfo].imports.to_list():
-                    import_paths["external/" + import_path] = True
+                    resolved = _resolve_import_path(import_path, ctx.workspace_name, ctx.bin_dir.path)
+                    for e in resolved:
+                        import_paths[e] = True
 
     # When srcs contain labels to other targets (e.g., genrules that produce .py files),
     # we need to collect their transitive sources for proper type resolution
@@ -106,11 +191,11 @@ def _ty_aspect_impl(target, ctx):
         for src in ctx.rule.attr.srcs:
             if PyInfo in src:
                 transitive_sources.append(src[PyInfo].transitive_sources)
+                transitive_sources.append(src[PyInfo].transitive_pyi_files)
                 for import_path in src[PyInfo].imports.to_list():
-                    import_paths["external/" + import_path] = True
-
-    if not should_visit(ctx.rule, ctx.attr._rule_kinds, ctx.attr._filegroup_tags):
-        return []
+                    resolved = _resolve_import_path(import_path, ctx.workspace_name, ctx.bin_dir.path)
+                    for e in resolved:
+                        import_paths[e] = True
 
     files_to_lint = filter_srcs(ctx.rule)
     outputs, info = output_files(_MNEMONIC, target, ctx)
@@ -127,7 +212,7 @@ def _ty_aspect_impl(target, ctx):
     ty_action(ctx, ctx.executable._ty, files_to_lint, transitive_srcs_depset, ctx.files._config_file, outputs.human.out, outputs.human.exit_code, env = color_env, extra_search_paths = extra_search_paths)
 
     raw_machine_report = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name, mnemonic = _MNEMONIC, suffix = "raw_machine_report"))
-    ty_action(ctx, ctx.executable._ty, files_to_lint, transitive_srcs_depset, ctx.files._config_file, raw_machine_report, outputs.machine.exit_code, extra_search_paths = extra_search_paths)
+    ty_action(ctx, ctx.executable._ty, files_to_lint, transitive_srcs_depset, ctx.files._config_file, raw_machine_report, outputs.machine.exit_code, extra_search_paths = extra_search_paths, color = False)
 
     # Ideally we'd just use {"TY_OUTPUT_FORMAT": "sarif"} however it prints absolute paths; see https://github.com/astral-sh/ruff/issues/14985
     # This issue should also be resolved when the issue from ruff is fixed.
@@ -158,11 +243,6 @@ def lint_ty_aspect(binary, config, rule_kinds = ["py_binary", "py_library", "py_
             "_ty": attr.label(
                 default = binary,
                 allow_files = True,
-                executable = True,
-                cfg = "exec",
-            ),
-            "_patcher": attr.label(
-                default = "@aspect_rules_lint//lint/private:patcher",
                 executable = True,
                 cfg = "exec",
             ),

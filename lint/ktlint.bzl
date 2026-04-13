@@ -51,7 +51,7 @@ If your custom ruleset is a third-party dependency and not a first-party depende
 """
 
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+load("@rules_java//java/common/rules:java_runtime.bzl", "JavaRuntimeInfo")
 load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "filter_srcs", "noop_lint_action", "output_files", "should_visit")
 
 _MNEMONIC = "AspectRulesLintKTLint"
@@ -84,8 +84,8 @@ def ktlint_action(ctx, executable, srcs, editorconfig, stdout, baseline_file, ja
     # ktlint artifact is published as an "executable" script which calls the fat jar
     # so we need to pass a hermetic Java runtime from our build to avoid relying on
     # system Java
-    java_home = java_runtime[java_common.JavaRuntimeInfo].java_home
-    java_runtime_files = java_runtime[java_common.JavaRuntimeInfo].files
+    java_home = java_runtime[JavaRuntimeInfo].java_home
+    java_runtime_files = java_runtime[JavaRuntimeInfo].files
     env = {
         "JAVA_HOME": java_home,
     }
@@ -152,7 +152,7 @@ def lint_ktlint_aspect(binary, editorconfig, baseline_file, ruleset_jar = None, 
     """A factory function to create a linter aspect.
 
     Args:
-        binary: a ktlint executable, provided as file typically through http_file declaration or using fetch_ktlint in your WORKSPACE.
+        binary: a ktlint executable, provided as file typically through http_file declaration or using tools.ktlint module extension.
         editorconfig: The label of the file pointing to the .editorconfig file used by ktlint.
         baseline_file: An optional attribute pointing to the label of the baseline file used by ktlint.
         ruleset_jar: An optional, custom ktlint ruleset provided as a fat jar, and works on top of the standard rules.
@@ -197,7 +197,7 @@ def lint_ktlint_aspect(binary, editorconfig, baseline_file, ruleset_jar = None, 
                 allow_single_file = True,
             ),
             "_java_runtime": attr.label(
-                default = "@bazel_tools//tools/jdk:current_java_runtime",
+                default = "@rules_java//toolchains:current_java_runtime",
             ),
             "_rule_kinds": attr.string_list(
                 default = rule_kinds,
@@ -206,12 +206,4 @@ def lint_ktlint_aspect(binary, editorconfig, baseline_file, ruleset_jar = None, 
         toolchains = [
             "@bazel_tools//tools/jdk:toolchain_type",
         ],
-    )
-
-def fetch_ktlint():
-    http_file(
-        name = "com_github_pinterest_ktlint",
-        sha256 = "2e28cf46c27d38076bf63beeba0bdef6a845688d6c5dccd26505ce876094eb92",
-        url = "https://github.com/pinterest/ktlint/releases/download/1.2.1/ktlint",
-        executable = True,
     )
