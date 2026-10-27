@@ -29,6 +29,12 @@ write_file(
     content = ["import os"],
 )
 
+write_file(
+    name = "py_code_generator_no_imports",
+    out = "main_generated_no_imports.py",
+    content = ["import os"],
+)
+
 py_library(
     name = "generated_py",
     srcs = ["generated.py"],
@@ -113,28 +119,59 @@ pydoclint_test(
     expected_exit_code = 1,
 )
 
+py_library(
+    name = "generated",
+    srcs = ["generated.py"],
+    imports = ["."],
+)
 
-py_library(name = "generated",
-           srcs = ["generated.py"],
-           imports = ["."])
-
-py_library(name = "dep_generated",
-           srcs = ["dep_generated.py"],
-           deps = [":generated"])
+py_library(
+    name = "dep_generated",
+    srcs = ["dep_generated.py"],
+    deps = [":generated"],
+)
 
 ty_test(
     name = "ty_should_find_generated_dep",
-    srcs = [":dep_generated"]
+    srcs = [":dep_generated"],
 )
 
-py_library(name = "dep_ext_generated",
-           srcs = ["dep_generated.py"],
-           deps = ["@ext_mod//src:generated"]
+py_library(
+    name = "generated_no_imports",
+    srcs = ["main_generated_no_imports.py"],
+)
+
+py_library(
+    name = "dep_main_generated_no_imports",
+    srcs = ["dep_main_generated_no_imports.py"],
+    deps = [":generated_no_imports"],
+)
+
+ty_test(
+    name = "ty_should_find_main_generated_no_imports_dep",
+    srcs = [":dep_main_generated_no_imports"],
+)
+
+py_library(
+    name = "dep_ext_generated",
+    srcs = ["dep_generated.py"],
+    deps = ["@ext_mod//src:generated"],
 )
 
 ty_test(
     name = "ty_should_find_ext_generated_dep",
-    srcs = [":dep_ext_generated"]
+    srcs = [":dep_ext_generated"],
+)
+
+py_library(
+    name = "dep_bcr",
+    srcs = ["dep_bcr.py"],
+    deps = ["@abseil-py//absl/testing:absltest"],
+)
+
+ty_test(
+    name = "ty_should_find_bcr_dep",
+    srcs = [":dep_bcr"],
 )
 
 ty_test(
@@ -198,6 +235,13 @@ report_test(
 ty_test(
     name = "ty_should_resolve_workspace_dep_with_imports",
     srcs = ["//src:uses_dependency_correctly"],
+)
+
+# Reproduces argument loss when Bazel materializes a long `run_shell` command.
+# The clean source must not inherit the unrelated error from its transitive dep.
+ty_test(
+    name = "ty_should_scope_materialized_command",
+    srcs = ["//src:uses_dependency_correctly_materialized"],
 )
 
 ty_test(

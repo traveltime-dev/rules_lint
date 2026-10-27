@@ -1,3 +1,17 @@
+# Aspect's rc for vanilla `bazel`. Generated at the repository root by
+# `aspect setup bazelrc`; regenerate there, not here. %workspace% is this
+# example, so `../..` reaches the root the examples share.
+try-import %workspace%/../../.aspect/bazelrc
+
 # Required for isolated extension usages (needed for keep-sorted dependency)
 common --experimental_isolated_extension_usages
+
 build:lint --aspects=//tools/lint:linters.bzl%keep_sorted
+
+# Build without the bytes
+common:ci --remote_download_outputs=minimal
+common:ci --nobuild_runfile_links
+
+# Override the preset's `--lockfile_mode=error` on CI since we don't
+# yet commit MODULE.bazel.lock — see .gitignore.
+common:ci --lockfile_mode=off

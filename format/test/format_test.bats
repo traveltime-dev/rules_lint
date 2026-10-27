@@ -4,6 +4,13 @@
 bats_load_library "bats-support"
 bats_load_library "bats-assert"
 
+setup() {
+    # Run bazel from the workspace root so BUILD_WORKING_DIRECTORY equals
+    # BUILD_WORKSPACE_DIRECTORY. format.sh cds to BUILD_WORKING_DIRECTORY, so
+    # running from a subdirectory would scope git ls-files to that subtree only.
+    cd "$(git rev-parse --show-toplevel)"
+}
+
 # No arguments: will use git ls-files
 @test "should run prettier on javascript using git ls-files" {
     run bazel run //format/test:format_JavaScript_with_prettier
@@ -13,7 +20,7 @@ bats_load_library "bats-assert"
     assert_output --partial "+ prettier --write --log-level=warn examples/nodejs/src/(special_char)/[square]/hello.ts examples/nodejs/src/file-dep.ts examples/nodejs/src/file.ts"
     assert_output --partial "+ prettier --write --log-level=warn examples/nodejs/src/hello.tsx"
     assert_output --partial "+ prettier --write --log-level=warn examples/nodejs/src/hello.vue"
-    assert_output --partial "+ prettier --write --log-level=warn .bcr/metadata.template.json"
+    assert_output --partial "+ prettier --write --log-level=warn .aspect/config.json .bcr/lint/rust/metadata.template.json .bcr/lint/rust/source.template.json .bcr/lint/scala/metadata.template.json .bcr/lint/scala/source.template.json .bcr/metadata.template.json .bcr/source.template.json"
     assert_output --partial "+ prettier --write --log-level=warn examples/nodejs/.swcrc"
     assert_output --partial "+ prettier --write --log-level=warn examples/other_formatters/src/config.json5"
 }
@@ -31,7 +38,7 @@ bats_load_library "bats-assert"
     run bazel run //format/test:format_Starlark_with_buildifier
     assert_success
 
-    assert_output --partial "+ buildifier -mode=fix BUILD.bazel"
+    assert_output --partial "buildifier -mode=fix .aspect/config.axl"
     assert_output --partial "format/private/BUILD.bazel"
 }
 
@@ -111,7 +118,13 @@ bats_load_library "bats-assert"
     run bazel run //format/test:format_TOML_with_taplo
     assert_success
 
-    assert_output --partial '+ taplo format _typos.toml examples/python/pyproject.toml'
+    assert_output --partial "+ taplo format"
+    assert_output --partial "_typos.toml"
+    assert_output --partial "examples/python/pyproject.toml"
+    assert_output --partial "examples/python/src/ruff.toml examples/python/src/subdir/ruff.toml"
+    assert_output --partial "examples/rust/.clippy.toml"
+    assert_output --partial "examples/toml/.taplo.toml"
+    assert_output --partial "examples/toml/src/bad.toml examples/toml/src/hello.toml"
 }
 
 @test "should run terraform fmt on HCL" {
@@ -146,7 +159,7 @@ bats_load_library "bats-assert"
     run bazel run //format/test:format_Scala_with_scalafmt
     assert_success
 
-    assert_output --partial "+ scalafmt --respect-project-filters examples/scala/src/hello.scala"
+    assert_output --partial "+ scalafmt --respect-project-filters examples/scala/src/App.scala examples/scala/src/Foo.scala"
 }
 
 @test "should run gofmt on Go" {
@@ -199,7 +212,7 @@ bats_load_library "bats-assert"
     run bazel run //format/test:format_YAML_with_yamlfmt
     assert_success
 
-    assert_output --partial "+ yamlfmt .aspect/workflows/config.yaml"
+    assert_output --partial "+ yamlfmt .bcr/lint/rust/presubmit.yml .bcr/lint/scala/presubmit.yml .bcr/presubmit.yml"
 }
 
 @test "should run rustfmt on Rust" {
@@ -235,4 +248,11 @@ bats_load_library "bats-assert"
     assert_success
 
     assert_output --partial "pkl format --write examples/pkl/src/cats.pkl"
+}
+
+@test "should run modfmt on Go Module" {
+    run bazel run //format/test:format_Go_Module_with_modfmt
+    assert_success
+
+    assert_output --partial "+ modfmt -w examples/go-module/go.mod"
 }

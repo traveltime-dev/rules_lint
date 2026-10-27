@@ -1,17 +1,18 @@
 load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_library", "js_run_binary", "js_test")
 load("@bazel_lib//lib:diff_test.bzl", "diff_test")
-load("//lint/private:patcher_run.bzl", "patcher_run")
-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("//:patcher_run.bzl", "patcher_run")
 
 js_library(
     name = "diagnostic-formatter",
-    srcs = ["rust.diagnostic-formatter.js"],
+    srcs = ["rust.diagnostic-formatter.cjs"],
 )
 
 js_binary(
     name = "cli",
-    data = [":diagnostic-formatter"],
-    entry_point = "rust.cli.js",
+    data = [
+        ":diagnostic-formatter",
+    ],
+    entry_point = "rust.cli.cjs",
     # Must be public because users will depend on it when they instantiate the aspect.
     visibility = ["//visibility:public"],
 )
@@ -25,10 +26,12 @@ js_run_binary(
     outs = ["got.sarif.out"],
     args = [
         "sarif",
-        "$(rootpath testdata/sarif/clippy.diagnostics)",
-        "$(rootpath got.sarif.out)",
+        "$(execpath testdata/sarif/clippy.diagnostics)",
+        "$(execpath got.sarif.out)",
     ],
+    env = {"BAZEL_BINDIR": "."},
     tool = ":cli",
+    use_execroot_entry_point = False,
 )
 
 js_test(
@@ -37,7 +40,7 @@ js_test(
         "testdata/sarif/clippy.sarif.expected",
         ":got.sarif",
     ],
-    entry_point = "rust.diagnostic-formatter.test.js",
+    entry_point = "rust.diagnostic-formatter.test.cjs",
     env = {
         "WANT": "$(rootpath testdata/sarif/clippy.sarif.expected)",
         "GOT": "$(rootpath :got.sarif)",
@@ -53,10 +56,12 @@ js_run_binary(
     outs = ["got.human.out"],
     args = [
         "human-readable",
-        "$(rootpath testdata/human/clippy.diagnostics)",
-        "$(rootpath got.human.out)",
+        "$(execpath testdata/human/clippy.diagnostics)",
+        "$(execpath got.human.out)",
     ],
+    env = {"BAZEL_BINDIR": "."},
     tool = ":cli",
+    use_execroot_entry_point = False,
 )
 
 diff_test(
@@ -85,15 +90,4 @@ diff_test(
     name = "test_patch",
     file1 = ":got.patch",
     file2 = "testdata/patch/clippy.patch.expected",
-)
-
-sh_binary(
-    name = "process_wrapper_wrapper",
-    srcs = ["process_wrapper_wrapper.bash"],
-    data = [
-        "@rules_rust//util/process_wrapper",
-    ],
-    # Aspect visibility rules are not on by default.
-    visibility = ["//visibility:public"],
-    deps = ["@rules_shell//shell/runfiles"],
 )

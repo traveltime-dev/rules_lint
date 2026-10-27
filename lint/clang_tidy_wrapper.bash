@@ -32,21 +32,43 @@ if [[ -n $CLANG_TIDY__STDOUT_STDERR_OUTPUT_FILE ]]; then
 else
     out_file=$(mktemp)
 fi
+# Capture raw output here; statistics get filtered into $out_file below.
+raw_out_file=$(mktemp)
 # include stderr in output file; it contains some of the diagnostics
-command="$clang_tidy $@ $file > $out_file 2>&1"
+# NB: do NOT collapse "$@" into a single string and eval it — args containing
+# shell metacharacters such as `__attribute__((deprecated))` then get re-parsed
+# by the shell ("syntax error near unexpected token `('"). Run clang-tidy
+# directly with "$@" so each argument is preserved verbatim.
 if [[ -n $CLANG_TIDY__VERBOSE ]]; then
     echo "$@"
     echo "cwd: " `pwd`
-    echo $command
+    echo "$clang_tidy $@ > $raw_out_file 2>&1"
 fi
-eval $command
+"$clang_tidy" "$@" > "$raw_out_file" 2>&1
 exit_code=$?
+# Drop clang-tidy summary statistics (e.g. "N warnings generated.") that it
+# prints even on a clean, exit-0 run thus tripping in fail_on_violation mode.
+# Diagnostics are kept.
+grep -Ev '^[0-9]+ (warnings?|errors?)( and [0-9]+ errors?)? generated\.$|^Suppressed [0-9]+ warnings? \(.*\)\.$|^Use -header-filter=.*$|^[0-9]+ warnings? treated as errors?$' $raw_out_file > $out_file
+grep_status=$?
+rm -f $raw_out_file
+# grep exit >=2 means grep itself failed and $out_file is unreliable; bail
+# before the return-code logic below reads it and reports a false-clean result.
+if [ $grep_status -gt 1 ]; then
+    echo "clang_tidy_wrapper: failed to filter clang-tidy output (grep exit $grep_status)" >&2
+    exit $grep_status
+fi
 if [[ -z $CLANG_TIDY__STDOUT_STDERR_OUTPUT_FILE ]]; then
     cat $out_file
 fi
 # distinguish between compile (fatal) errors and warnings-as-errors errors
 fatal_error=0
-if [ $exit_code -ne 0 ] && [ -s $out_file ]; then
+if [ $exit_code -eq 126 ] || [ $exit_code -eq 127 ]; then
+    # 126/127 mean clang-tidy never ran (not executable, or a shared library
+    # the loader could not resolve). With no diagnostics to capture, recording
+    # the code would leave the report indistinguishable from a clean lint.
+    fatal_error=1
+elif [ $exit_code -ne 0 ] && [ -s $out_file ]; then
     while read line
     do
         if [[ $line == *"clang-diagnostic-error"* ]]; then
@@ -57,9 +79,13 @@ if [ $exit_code -ne 0 ] && [ -s $out_file ]; then
 fi
 if [ $fatal_error -ne 0 ]; then
     cat $out_file
-    rm $out_file
+    # only a temp file is ours to delete; when the env var is set this is a
+    # declared Bazel output, and the diagnostics in it are the whole evidence
+    if [[ -z $CLANG_TIDY__STDOUT_STDERR_OUTPUT_FILE ]]; then
+        rm $out_file
+    fi
     if [[ -n $CLANG_TIDY__VERBOSE ]]; then
-        echo "found clang-diagnostic-error (regarding as fatal)"
+        echo "regarding exit $exit_code as fatal"
         echo "exit $exit_code"
     fi
     exit $exit_code
@@ -80,5 +106,16 @@ fi
 
 if [[ -n $CLANG_TIDY__VERBOSE ]]; then
     echo exit $exit_code
+fi
+# Surface the captured diagnostics on the action's stderr when we are about
+# to exit non-zero. Without this, fail_on_violation builds report
+# `Linting //x:y failed` with no body — the diagnostic text sits in the
+# .out file (CLANG_TIDY__STDOUT_STDERR_OUTPUT_FILE) and never reaches the
+# user. The fatal_error branch above already cats to stdout for
+# clang-diagnostic-error; this covers the warnings-as-errors case
+# (e.g. WarningsAsErrors: "*") where there is no clang-diagnostic-error
+# string in the output.
+if [ $exit_code -ne 0 ] && [ -n "$CLANG_TIDY__STDOUT_STDERR_OUTPUT_FILE" ] && [ -s "$out_file" ]; then
+    cat "$out_file" >&2
 fi
 exit $exit_code

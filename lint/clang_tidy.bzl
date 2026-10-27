@@ -40,6 +40,7 @@ clang_tidy = lint_clang_tidy_aspect(
 load("@bazel_skylib//rules/directory:providers.bzl", "DirectoryInfo")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
+load("@rules_cc//cc:defs.bzl", "CcInfo", "cc_common")
 load("//lint/private:lint_aspect.bzl", "LintOptionsInfo", "OPTIONAL_SARIF_PARSER_TOOLCHAIN", "OUTFILE_FORMAT", "noop_lint_action", "output_files", "parse_to_sarif_action", "patch_and_output_files", "should_visit")
 load("//lint/private:patcher_action.bzl", "patcher_attrs", "run_patcher")
 
@@ -230,9 +231,6 @@ def _aggregate_regex(ctx, compilation_context):
         print("target header dirs: " + ",".join(dirs))
     return regex
 
-def _quoted_arg(arg):
-    return "\"" + arg + "\""
-
 def _get_env(ctx, srcs):
     sources_are_cxx = _is_cxx(srcs[0])
     if (sources_are_cxx):
@@ -250,16 +248,18 @@ def _get_env(ctx, srcs):
     return env
 
 def _get_args(ctx, compilation_context, srcs):
+    # These reach clang-tidy verbatim; the wrapper runs it directly, so shell
+    # quoting added here arrives as literal characters.
     args = []
     if (any(ctx.files._global_config)):
         args.append("--config-file=" + ctx.files._global_config[0].path)
     if (ctx.attr._lint_target_headers):
         regex = _aggregate_regex(ctx, compilation_context)
         if (regex):
-            args.append(_quoted_arg("-header-filter=" + regex))
+            args.append("-header-filter=" + regex)
     elif (ctx.attr._header_filter):
         regex = ctx.attr._header_filter
-        args.append(_quoted_arg("-header-filter=" + regex))
+        args.append("-header-filter=" + regex)
     args.extend([src.path for src in srcs])
     return args
 
@@ -303,7 +303,7 @@ def _get_compiler_args(ctx, compilation_context, srcs):
     args.extend(_prefixed(compilation_context.external_includes.to_list(), "-isystem"))
     return args
 
-def clang_tidy_action(ctx, compilation_context, executable, srcs, stdout, exit_code, patch = None):
+def clang_tidy_action(ctx, compilation_context, executable, srcs, stdout, exit_code, patch = None, args = []):
     """Create a Bazel Action that spawns a clang-tidy process.
 
     Adapter for wrapping Bazel around
@@ -318,11 +318,12 @@ def clang_tidy_action(ctx, compilation_context, executable, srcs, stdout, exit_c
         exit_code: output file containing the exit code of clang-tidy.
             If None, then fail the build when clang-tidy exits non-zero.
         patch: output file for patch (optional). If provided, uses run_patcher instead of run_shell.
+        args: additional clang-tidy arguments passed before the compiler arguments
     """
 
     # Common setup for both patch and non-patch actions
     inputs = _gather_inputs(ctx, compilation_context, srcs)
-    clang_tidy_args = _get_args(ctx, compilation_context, srcs)
+    clang_tidy_args = list(args) + _get_args(ctx, compilation_context, srcs)
     compiler_args = _get_compiler_args(ctx, compilation_context, srcs)
     env = _get_env(ctx, srcs)
     tools = [executable._clang_tidy_wrapper, executable._clang_tidy, find_cpp_toolchain(ctx).all_files]
@@ -406,11 +407,12 @@ def _clang_tidy_aspect_impl(target, ctx):
             output.human.out,
             output.human.exit_code,
             patch = getattr(output, "patch", None),
+            args = ctx.attr._args,
         )
 
         # TODO(alex): if we run with --fix, this will report the issues that were fixed. Does a machine reader want to know about them?
         raw_machine_report = ctx.actions.declare_file(OUTFILE_FORMAT.format(label = target.label.name + "_rules_lint/" + file.short_path, mnemonic = _MNEMONIC, suffix = "raw_machine_report"))
-        clang_tidy_action(ctx, compilation_context, ctx.executable, [file], raw_machine_report, output.machine.exit_code)
+        clang_tidy_action(ctx, compilation_context, ctx.executable, [file], raw_machine_report, output.machine.exit_code, args = ctx.attr._args)
         parse_to_sarif_action(ctx, _MNEMONIC, raw_machine_report, output.machine.out)
     return [info]
 
@@ -426,7 +428,8 @@ def lint_clang_tidy_aspect(
         lint_target_headers = False,
         angle_includes_are_system = True,
         verbose = False,
-        rule_kinds = DEFAULT_RULE_KINDS):
+        rule_kinds = DEFAULT_RULE_KINDS,
+        args = []):
     """A factory function to create a linter aspect.
 
     Args:
@@ -455,6 +458,8 @@ def lint_clang_tidy_aspect(
             passes these as -isystem. Change this to False to pass these as -I, which allows clang-tidy to regard
             them as regular header files.
         verbose: print debug messages including clang-tidy command lines being invoked.
+        rule_kinds: which target kinds should be visited automatically
+        args: additional options to pass to clang-tidy
     """
 
     if type(global_config) == "string":
@@ -507,6 +512,9 @@ def lint_clang_tidy_aspect(
             "_cc_toolchain": attr.label(default = Label("@bazel_tools//tools/cpp:current_cc_toolchain")),
             "_rule_kinds": attr.string_list(
                 default = rule_kinds,
+            ),
+            "_args": attr.string_list(
+                default = args,
             ),
         },
         toolchains = [
