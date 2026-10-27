@@ -13,11 +13,13 @@ source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
   { echo>&2 "ERROR: runfiles.bash initializer cannot find $f. An executable rule may have forgotten to expose it in the runfiles, or the binary may require RUNFILES_DIR to be set."; exit 1; }; f=; set -e
 # --- end runfiles.bash initialization v3 ---
 
-if [[ -n "$BUILD_WORKSPACE_DIRECTORY" ]]; then
-  # Needed for the rustfmt binary wrapper in rules_rust; see
-  # https://github.com/aspect-build/rules_lint/pull/327
-  unset BUILD_WORKING_DIRECTORY
-  cd $BUILD_WORKSPACE_DIRECTORY
+# Prefer BUILD_WORKING_DIRECTORY so git ls-files scopes to the invoking subtree
+# and all paths stay CWD-relative. The previous unset BUILD_WORKING_DIRECTORY
+# (#327) was wrong — see https://github.com/aspect-build/rules_lint/pull/882.
+if [[ -n "${BUILD_WORKING_DIRECTORY:-}" ]]; then
+  cd "$BUILD_WORKING_DIRECTORY"
+elif [[ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]]; then
+  cd "$BUILD_WORKSPACE_DIRECTORY"
 elif [[ -n "$TEST_WORKSPACE" ]]; then
   if [[ -n "$WORKSPACE" ]]; then
     WORKSPACE_PATH="$(dirname "$(realpath ${WORKSPACE})")"
@@ -62,7 +64,12 @@ function process_args_in_batches() {
     # Uses up to ARG_MAX - 2k, or 128k, whichever is smaller, characters per
     # command. This was derived from following the defaults from xargs
     # https://www.gnu.org/software/findutils/manual/html_node/find_html/Limiting-Command-Size.html
-    max_batch_size=$(getconf ARG_MAX)-2048
+    # MSYS and Cygwin report ARG_MAX as "undefined", so fall back to the 8191
+    # character command line limit of cmd.exe, which formatters shipped as a
+    # `.bat` launcher have to be invoked through.
+    arg_max=$(getconf ARG_MAX)
+    [[ "$arg_max" =~ ^[0-9]+$ ]] || arg_max=8191
+    max_batch_size=$((arg_max - 2048))
     max_batch_size=$((max_batch_size < 128000 ? max_batch_size : 128000))
     
     # Check if there's only one argument and it starts with '@'
@@ -123,6 +130,7 @@ function ls-files {
       'CSS') patterns=('*.css') ;;
       'F#') patterns=('*.fs') ;;
       'Go') patterns=('*.go') ;;
+      'Go Module') patterns=('go.mod' 'go.work') ;;
       'GraphQL') patterns=('*.graphql' '*.gql' '*.graphqls') ;;
       'HTML') patterns=('*.html' '*.hta' '*.htm' '*.html.hl' '*.inc' '*.xht' '*.xhtml') ;;
       'JSON') patterns=('.all-contributorsrc' '.arcconfig' '.auto-changelog' '.c8rc' '.htmlhintrc' '.imgbotconfig' '.nycrc' '.tern-config' '.tern-project' '.watchmanconfig' 'Pipfile.lock' 'composer.lock' 'deno.lock' 'flake.lock' 'mcmod.info' '*.json' '*.4DForm' '*.4DProject' '*.avsc' '*.geojson' '*.gltf' '*.har' '*.ice' '*.JSON-tmLanguage' '*.jsonl' '*.mcmeta' '*.tfstate' '*.tfstate.backup' '*.topojson' '*.webapp' '*.webmanifest' '*.yy' '*.yyp') ;;
@@ -286,7 +294,7 @@ function run-format {
   local args="$1" && shift
   local TIMEFORMAT="Formatted ${lang} in %lR"
 
-  local files=$(ls-files "$lang" $@)
+  local files=$(ls-files "$lang" "$@")
   if [ -n "$files" ] && [ -n "$bin" ]; then
     case "$lang" in
       'Protocol Buffer')

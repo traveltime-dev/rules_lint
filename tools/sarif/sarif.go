@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/reviewdog/errorformat"
@@ -80,6 +81,29 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 		}
 	case "AspectRulesLintVale":
 		fm = []string{`%f:%l:%c:%m`}
+	case "AspectRulesLintCppCheck":
+		// Keyed to the --template the cppcheck aspect pins. Order matters: errorformat takes
+		// the first matching pattern, so the ignore patterns have to precede what they would
+		// otherwise fall into.
+		fm = []string{
+			// run metadata carries no location, e.g. `nofile:0:0: information: Active checkers: ...`
+			`%-Gnofile:%.%#`,
+			`%E%f:%l:%c: error: %m`,
+			// --report-type prints the coding-standard classification in place of the severity
+			`%E%f:%l:%c: Mandatory: %m`,
+			`%E%f:%l:%c: Required: %m`,
+			`%W%f:%l:%c: warning: %m`,
+			`%W%f:%l:%c: Advisory: %m`,
+			`%I%f:%l:%c: style: %m`,
+			`%I%f:%l:%c: performance: %m`,
+			`%I%f:%l:%c: portability: %m`,
+			`%I%f:%l:%c: information: %m`,
+			`%I%f:%l:%c: debug: %m`,
+			// a classification this list does not enumerate still yields a finding. Its leading
+			// token stays in the message, since errorformat cannot both match and discard it.
+			`%I%f:%l:%c: %m`,
+			`%-G%.%#`,
+		}
 	case "AspectRulesLintClangTidy":
 		fm = []string{
 			`%f:%l:%c: %trror: %m`,
@@ -113,12 +137,29 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 			`%IInfo: %f:%l:%c: %m`,
 			`%-G%.%#`,
 		}
+	case "AspectRulesLintKTLint":
+		// ktlint --relative text output: `path:line:col: message (rule)`.
+		fm = []string{`%f:%l:%c: %m`}
 	case "AspectRulesLintKeepSorted":
 		fm = []string{`%f:%l:%e:%m`}
 	case "AspectRulesLintTy":
 		fm = []string{
 			`%Eerror%m`,
-			`%C\\ \\ -->\\ %f:%l:%c`,
+			`%C\\ %#-->\\ %f:%l:%c`,
+			`%-G%.%#`,
+		}
+	case "AspectRulesLintRuboCop", "AspectRulesLintStandardRB":
+		return rubocopJsonToSarif(label, mnemonic, report)
+	case "AspectRulesLintScalafix":
+		fm = []string{
+			`%f:%l:%c: %trror: %m`,
+			`%f:%l:%c: %tarning: %m`,
+			`%-G%m`, // ignore any lines that do not match the above patterns
+		}
+	case "AspectRulesLintTaplo":
+		fm = []string{
+			`%Eerror: %m`,
+			`%C%.%# %f:%l:%c`,
 			`%-G%.%#`,
 		}
 	default:
@@ -164,15 +205,95 @@ func ToSarifJsonString(label string, mnemonic string, report string) (sarifJsonS
 		}
 	}
 
+	if mnemonic == "AspectRulesLintScalafix" {
+		for _, entry := range scalafixDiffEntries(report) {
+			entry.Filename = determineRelativePath(entry.Filename, label)
+			if err := jsonWriter.Write(entry); err != nil {
+				return "", err
+			}
+		}
+	}
+
 	return sarifJsonString, nil
 }
+
+// rubocopJsonToSarif converts a RuboCop/StandardRB JSON report (--format json) to SARIF.
+// Both linters share the same JSON schema.
+func rubocopJsonToSarif(label, mnemonic, report string) (sarifJsonString string, err error) {
+	var rb struct {
+		Files []struct {
+			Path     string `json:"path"`
+			Offenses []struct {
+				Severity string `json:"severity"`
+				Message  string `json:"message"`
+				CopName  string `json:"cop_name"`
+				Location struct {
+					Line   int `json:"line"`
+					Column int `json:"column"`
+				} `json:"location"`
+			} `json:"offenses"`
+		} `json:"files"`
+	}
+	if err = json.Unmarshal([]byte(report), &rb); err != nil {
+		return "", fmt.Errorf("failed to parse RuboCop JSON: %w", err)
+	}
+
+	var buf bytes.Buffer
+	var jw writer.Writer
+	jw, err = writer.NewSarif(&buf, writer.SarifOption{ToolName: mnemonicPrettyName(mnemonic)})
+	if err != nil {
+		return "", err
+	}
+
+	if bw, ok := jw.(writer.BufWriter); ok {
+		defer func() {
+			if fErr := bw.Flush(); fErr != nil {
+				log.Println(fErr)
+			}
+			sarifJsonString = buf.String()
+		}()
+	}
+
+	for _, f := range rb.Files {
+		for _, o := range f.Offenses {
+			t := rune('W')
+			switch o.Severity {
+			case "error", "fatal":
+				t = 'E'
+			case "convention", "refactor", "info":
+				t = 'I'
+			}
+			entry := &errorformat.Entry{
+				Filename: determineRelativePath(f.Path, label),
+				Lnum:     o.Location.Line,
+				Col:      o.Location.Column,
+				Type:     t,
+				Text:     o.CopName + ": " + o.Message,
+			}
+			if err = jw.Write(entry); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	return sarifJsonString, nil
+}
+
+// Matches an absolute path once separators have been normalised to slashes:
+// either a POSIX path ("/foo") or a Windows drive-letter path ("C:/foo").
+// filepath.IsAbs cannot be used here because it only recognises the host's
+// convention, which would make the result depend on the platform running the linter.
+var absolutePathRe = regexp.MustCompile(`^(?:/|[a-zA-Z]:/)`)
 
 // We expect relative paths when processing lint output and therefore need to convert any absolute paths.
 // Assumptions we make when determining the relative paths:
 //   - The linter is running on the host, so the path will have an 'execroot' segment
 //   - We only lint source files, so there is no 'bazel-bin/<platform>/bin' segment
 func determineRelativePath(path string, label string) string {
-	if !strings.HasPrefix(path, "/") || !strings.HasPrefix(label, "//") {
+	// A SARIF artifactLocation.uri is a URI, so it always uses forward slashes.
+	path = strings.ReplaceAll(path, `\`, "/")
+
+	if !absolutePathRe.MatchString(path) || !strings.HasPrefix(label, "//") {
 		return path
 	}
 
@@ -190,6 +311,51 @@ func determineRelativePath(path string, label string) string {
 	}
 
 	return path
+}
+
+func scalafixDiffEntries(report string) []*errorformat.Entry {
+	var entries []*errorformat.Entry
+	var currentFile string
+	hunkRe := regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+
+	for _, line := range strings.Split(report, "\n") {
+		if strings.HasPrefix(line, "--- ") {
+			path := strings.TrimSpace(strings.TrimPrefix(line, "--- "))
+			if path == "" {
+				currentFile = ""
+				continue
+			}
+			currentFile = path
+			continue
+		}
+		if strings.HasPrefix(line, "+++ ") {
+			if currentFile == "" {
+				path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+				if path != "" && path != "<expected fix>" {
+					currentFile = path
+				}
+			}
+			continue
+		}
+
+		match := hunkRe.FindStringSubmatch(line)
+		if len(match) == 2 && currentFile != "" {
+			start, err := strconv.Atoi(match[1])
+			if err != nil {
+				continue
+			}
+			entries = append(entries, &errorformat.Entry{
+				Filename: currentFile,
+				Lnum:     start,
+				Col:      1,
+				Text:     "Scalafix rewrite suggested",
+				Type:     'W',
+				Valid:    true,
+			})
+		}
+	}
+
+	return entries
 }
 
 func toSarifJson(sarifJsonString string) (sarifJson parser.SarifJson, err error) {
